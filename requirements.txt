@@ -1,0 +1,15 @@
+SimpleITK
+numpy
+torch
+torchvision
+torchaudio
+hydra-core
+omegaconf
+tqdm
+pyyaml
+pillow
+matplotlib
+pandas
+opencv-python
+scikit-image
+iopath
