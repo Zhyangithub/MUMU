@@ -1,163 +1,126 @@
-from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
+from pathlib import Path
+from hydra import initialize
+from hydra.core.global_hydra import GlobalHydra
 import sys
-import os
 
-# Add current directory to sys.path to ensure we can import sam2_train
+# -----------------------------------------------------------------------------
+# 1. 路径与环境配置
+# -----------------------------------------------------------------------------
+# 假设 sam2_train 文件夹与 model.py 同级
 current_dir = Path(__file__).parent
-sys.path.insert(0, str(current_dir))
+sys.path.append(str(current_dir))
 
 from sam2_train.build_sam import build_sam2_video_predictor
 
-# ============================================================
-# 配置路径
-# ============================================================
-# 如果使用 Grand Challenge 的 Algorithm Models 上传模型权重，
-# 运行时会解压到 /opt/ml/model/
-# 如果把 checkpoints 直接放在 Docker 镜像里，用下面的本地路径
-CHECKPOINT_PATH_GC = Path("/opt/ml/model/best_dice.pth")
-CHECKPOINT_PATH_LOCAL = Path("/opt/app/checkpoints/best_dice.pth")
-
+# [CRITICAL] 根据你的截图，Grand Challenge 会将模型解压到 /opt/ml/model/
+# 请确保你的 tar.gz 包里直接包含 .pth 文件，不要套文件夹
+# 如果你的文件名不是 best_dice.pth，请在这里修改
+CHECKPOINT_PATH = Path("/opt/ml/model/best_dice.pth") 
 CONFIG_NAME = "sam2_hiera_s.yaml"
 
-
-def get_checkpoint_path():
-    """按优先级查找 checkpoint 路径"""
-    if CHECKPOINT_PATH_GC.exists():
-        return str(CHECKPOINT_PATH_GC)
-    elif CHECKPOINT_PATH_LOCAL.exists():
-        return str(CHECKPOINT_PATH_LOCAL)
-    else:
-        raise FileNotFoundError(
-            f"Checkpoint not found at {CHECKPOINT_PATH_GC} or {CHECKPOINT_PATH_LOCAL}"
-        )
-
-
-def run_algorithm(
-    frames: np.ndarray,
-    target: np.ndarray,
-    frame_rate: float,
-    magnetic_field_strength: float,
-    scanned_region: str,
-) -> np.ndarray:
+def run_algorithm(frames: np.ndarray, target: np.ndarray, frame_rate: float, magnetic_field_strength: float, scanned_region: str) -> np.ndarray:
     """
-    MedSAM-2 based algorithm for TrackRAD2025.
-
     Args:
-    - frames (numpy.ndarray): shape (W, H, T) — the cine-MRI series.
-    - target (numpy.ndarray): shape (W, H, 1) — the initial tumor segmentation mask.
-    - frame_rate (float): Frame rate of the MRI series.
-    - magnetic_field_strength (float): B-field strength (0.35 or 1.5).
-    - scanned_region (str): Anatomical region scanned.
-
-    Returns:
-    - numpy.ndarray: shape (W, H, T) — predicted segmentation masks.
+    - frames: (T, H, W) -> SimpleITK loaded array (No transpose needed!)
+    - target: (1, H, W) or (H, W) -> First frame Ground Truth
     """
+    
+    # -------------------------------------------------------
+    # 2. 维度确认 (无需转置)
+    # -------------------------------------------------------
+    # inference.py 传进来的就是 (T, H, W)
+    T, H, W = frames.shape
+    
+    # Target 处理: 确保压缩成 (H, W)
+    # 比如从 (1, 512, 512) 变成 (512, 512)
+    target_hw = target.squeeze() 
 
-    # ============================================================
-    # 0. 解析维度
-    # ============================================================
-    # 官方约定: frames.shape == (W, H, T), target.shape == (W, H, 1)
-    W, H, T = frames.shape
-
-    # 转成 (T, H, W) 方便 PyTorch 处理（标准图像格式）
-    # frames: (W, H, T) -> transpose -> (T, H, W)
-    frames_thw = np.transpose(frames, (2, 1, 0))  # (T, H, W)
-
-    # target: (W, H, 1) -> 取第一帧 -> (W, H) -> 转置 -> (H, W)
-    mask_hw = target[:, :, 0].T  # (H, W)
-
-    # ============================================================
-    # 1. 初始化模型
-    # ============================================================
+    # -------------------------------------------------------
+    # 3. 初始化模型
+    # -------------------------------------------------------
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    ckpt_path = get_checkpoint_path()
+    
+    # 使用绝对路径初始化 Hydra，避免 Docker 路径迷路
+    config_dir = current_dir / "sam2_train"
+    
+    if not GlobalHydra.instance().is_initialized():
+        # config_path 必须转为 str
+        initialize(version_base='1.2', config_path=str(config_dir.name), job_name="trackrad_inference")
 
-    predictor = build_sam2_video_predictor(
-        config_file=CONFIG_NAME,
-        ckpt_path=ckpt_path,
-        device=device,
-    )
+    # 检查权重是否存在，打印日志方便调试
+    if not CHECKPOINT_PATH.exists():
+        print(f"⚠️ Warning: Checkpoint not found at {CHECKPOINT_PATH}!")
+        print(f"Listing /opt/ml/model/: {list(Path('/opt/ml/model/').glob('*'))}")
 
-    # ============================================================
-    # 2. 预处理帧 -> (T, 3, image_size, image_size)
-    # ============================================================
+    predictor = build_sam2_video_predictor(CONFIG_NAME, str(CHECKPOINT_PATH), device=device)
+
+    # -------------------------------------------------------
+    # 4. 预处理: 逐帧归一化 (关键步骤)
+    # -------------------------------------------------------
+    # 必须转为 float32
+    frames_float = frames.astype(np.float32)
+    
+    # [CRITICAL] 逐帧计算 Min/Max
+    # axis=(1, 2) 表示在 H, W 维度上计算，保留 T 维度 -> (T, 1, 1)
+    # 严禁使用全局 frames.min()，否则违反实时性规则
+    f_min = frames_float.min(axis=(1, 2), keepdims=True)
+    f_max = frames_float.max(axis=(1, 2), keepdims=True)
+    
     # 归一化到 0-255
-    frames_min = frames_thw.min()
-    frames_max = frames_thw.max()
-    if frames_max > frames_min:
-        frames_norm = (frames_thw - frames_min) / (frames_max - frames_min) * 255.0
-    else:
-        frames_norm = np.zeros_like(frames_thw, dtype=np.float32)
-
-    # (T, H, W) -> torch tensor -> (T, 1, H, W) -> (T, 3, H, W)
+    den = f_max - f_min
+    den[den == 0] = 1.0  # 防止除以0
+    frames_norm = (frames_float - f_min) / den * 255.0
+    
+    # 转 Tensor: (T, H, W) -> (T, 3, H, W)
     frames_tensor = torch.from_numpy(frames_norm).float()
-    frames_tensor = frames_tensor.unsqueeze(1).repeat(1, 3, 1, 1)  # (T, 3, H, W)
-
-    # Resize 到模型要求的 image_size (1024)
-    target_size = predictor.image_size  # 1024
+    frames_tensor = frames_tensor.unsqueeze(1).repeat(1, 3, 1, 1)
+    
+    # Resize (SAM2 需要特定尺寸输入)
+    target_size = predictor.image_size
     frames_resized = F.interpolate(
-        frames_tensor,
-        size=(target_size, target_size),
-        mode="bilinear",
-        align_corners=False,
-    )  # (T, 3, image_size, image_size)
+        frames_tensor, 
+        size=(target_size, target_size), 
+        mode='bilinear', 
+        align_corners=False
+    )
 
-    # ============================================================
-    # 3. 初始化推理状态
-    # ============================================================
-    # val_init_state 接收已经 resize 好的 tensor
-    # video_height/video_width 是原始分辨率，用于最终 resize 输出
+    # -------------------------------------------------------
+    # 5. 推理 (SAM 2)
+    # -------------------------------------------------------
+    # 初始化 Inference State
     inference_state = predictor.val_init_state(
-        frames_resized,
-        video_height=H,
-        video_width=W,
+        frames_resized, 
+        video_height=H, 
+        video_width=W
     )
-
-    # ============================================================
-    # 4. 添加初始 mask（frame 0 的 ground truth）
-    # ============================================================
-    # add_new_mask 要求 mask 是 2D, shape (H, W), bool 或可转为 bool
-    mask_bool = (mask_hw > 0)  # numpy (H, W) bool
+    
+    # 将第一帧的 Ground Truth 加入
     predictor.add_new_mask(
-        inference_state,
-        frame_idx=0,
-        obj_id=1,
-        mask=mask_bool,
+        inference_state, 
+        frame_idx=0, 
+        obj_id=1, 
+        mask=torch.from_numpy(target_hw).bool()
     )
+    
+    # 准备输出容器: (T, H, W)
+    output = np.zeros((T, H, W), dtype=np.uint8)
+    output[0] = target_hw.astype(np.uint8)
 
-    # ============================================================
-    # 5. 前向传播（forward only, 满足因果性要求）
-    # ============================================================
-    video_segments = {}  # frame_idx -> (H, W) mask
-
-    for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(
-        inference_state
-    ):
-        # out_mask_logits shape: (num_obj, 1, H, W)
-        # 找 obj_id=1 的索引
+    # 视频传播
+    # SAM 2 会自动处理时序依赖
+    for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(inference_state):
         if 1 in out_obj_ids:
             idx = out_obj_ids.index(1)
-            # out_mask_logits[idx] shape: (1, H, W)
-            mask_pred = (out_mask_logits[idx] > 0.0).squeeze(0)  # (H, W)
-            video_segments[out_frame_idx] = mask_pred.cpu().numpy().astype(np.uint8)
+            # 结果转为 uint8 mask
+            mask_pred = (out_mask_logits[idx] > 0.0).cpu().numpy().astype(np.uint8)
+            output[out_frame_idx] = mask_pred
 
-    # ============================================================
-    # 6. 组装输出 (T, H, W) 然后转回 (W, H, T)
-    # ============================================================
-    output_thw = np.zeros((T, H, W), dtype=np.uint8)
-
-    for t in range(T):
-        if t in video_segments:
-            output_thw[t] = video_segments[t]
-        elif t == 0:
-            # frame 0 用原始 target 作为 fallback
-            output_thw[t] = mask_hw.astype(np.uint8)
-
-    # 转回官方要求的 (W, H, T) 格式
-    # (T, H, W) -> transpose -> (W, H, T)
-    output = np.transpose(output_thw, (2, 1, 0))  # (W, H, T)
-
+    # -------------------------------------------------------
+    # 6. 返回结果
+    # -------------------------------------------------------
+    # 直接返回 (T, H, W)
+    # inference.py 会使用 SimpleITK 将其保存为正确的物理序列
     return output
