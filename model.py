@@ -13,8 +13,7 @@ sys.path.append(str(current_dir))
 
 from sam2_train.build_sam import build_sam2_video_predictor
 
-RESOURCE_PATH = Path("resources")
-CHECKPOINT_PATH = Path("checkpoints") / "best_dice.pth"
+CHECKPOINT_PATH = Path("/opt/ml/model/best_dice.pth") 
 CONFIG_NAME = "sam2_hiera_s.yaml"
 
 def run_algorithm(frames: np.ndarray, target: np.ndarray, frame_rate: float, magnetic_field_strength: float, scanned_region: str) -> np.ndarray:
