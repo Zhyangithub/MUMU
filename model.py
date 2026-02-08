@@ -4,49 +4,49 @@ import torch
 import torch.nn.functional as F
 import sys
 import os
-from hydra import initialize_config_dir, compose
-from hydra.core.global_hydra import GlobalHydra
 
-# Add current directory to sys.path to ensure we can import sam2_train
+# Add current directory to sys.path
 current_dir = Path(__file__).parent.resolve()
 sys.path.append(str(current_dir))
 
-from sam2_train.build_sam import build_sam2_video_predictor
-
-RESOURCE_PATH = Path("resources")
-
 # ============================================================
-# Checkpoint path: Grand Challenge uploads model weights to
-# /opt/ml/model/. Fall back to local checkpoints/ for testing.
+# Checkpoint: Grand Challenge -> /opt/ml/model/
 # ============================================================
 GC_MODEL_PATH = Path("/opt/ml/model")
 LOCAL_CHECKPOINT_PATH = current_dir / "checkpoints" / "best_dice.pth"
 
+
 def _find_checkpoint() -> str:
     """Locate the model checkpoint, preferring Grand Challenge path."""
-    # Grand Challenge: weights uploaded via Algorithm Models
+    # 1. Exact match
     gc_ckpt = GC_MODEL_PATH / "best_dice.pth"
     if gc_ckpt.exists():
-        print(f"Using Grand Challenge checkpoint: {gc_ckpt}")
+        print(f"[CKPT] Found: {gc_ckpt}")
         return str(gc_ckpt)
-    
-    # Also check if any .pth file exists under /opt/ml/model/
+
+    # 2. Any .pth at top level
     if GC_MODEL_PATH.exists():
-        pth_files = list(GC_MODEL_PATH.glob("*.pth"))
-        if pth_files:
-            print(f"Using Grand Challenge checkpoint: {pth_files[0]}")
-            return str(pth_files[0])
-    
-    # Local fallback for testing
+        for p in GC_MODEL_PATH.glob("*.pth"):
+            print(f"[CKPT] Found: {p}")
+            return str(p)
+
+        # 3. Recursive search
+        for p in GC_MODEL_PATH.rglob("*.pth"):
+            print(f"[CKPT] Found (recursive): {p}")
+            return str(p)
+
+        # Debug: list contents
+        print(f"[CKPT] Contents of {GC_MODEL_PATH}:")
+        for p in GC_MODEL_PATH.rglob("*"):
+            print(f"  {p} ({p.stat().st_size / 1e6:.1f} MB)" if p.is_file() else f"  {p}/")
+
+    # 4. Local fallback
     if LOCAL_CHECKPOINT_PATH.exists():
-        print(f"Using local checkpoint: {LOCAL_CHECKPOINT_PATH}")
+        print(f"[CKPT] Local fallback: {LOCAL_CHECKPOINT_PATH}")
         return str(LOCAL_CHECKPOINT_PATH)
-    
+
     raise FileNotFoundError(
-        f"No checkpoint found. Searched:\n"
-        f"  - {gc_ckpt}\n"
-        f"  - {GC_MODEL_PATH}/*.pth\n"
-        f"  - {LOCAL_CHECKPOINT_PATH}"
+        f"No checkpoint found at {GC_MODEL_PATH} or {LOCAL_CHECKPOINT_PATH}"
     )
 
 
@@ -63,60 +63,73 @@ def run_algorithm(
     """
     MedSAM-2 based tumor tracking algorithm.
 
-    Dimension convention (from official baseline documentation):
-        frames.shape == (W, H, T)   — but via SimpleITK GetArrayFromImage
-                                       the numpy array is actually (T, H, W)
-        target.shape == (W, H, 1)   — actually (1, H, W) in numpy
-
-    Since inference.py uses SimpleITK for both reading and writing, the
-    actual numpy convention is (T, H, W) / (1, H, W) throughout. We
-    process in this convention and return the same shape.
-
-    IMPORTANT: The output shape must match the input frames shape.
+    Args:
+        frames: (W, H, T) — official convention from inference.py
+        target: (W, H, 1) — official convention from inference.py
+    Returns:
+        output: (W, H, T) — must match input frames shape
     """
+    print(f"[INPUT] frames.shape = {frames.shape}, target.shape = {target.shape}")
 
-    # ------------------------------------------------------------------
-    # 1. Initialize Hydra and build model
-    # ------------------------------------------------------------------
-    # Use absolute path for config_dir to avoid working-directory issues
-    config_abs_path = str(current_dir / "sam2_train")
+    # ==================================================================
+    # CRITICAL FIX 1: Transpose input (W, H, T) -> (T, H, W) for processing
+    # ==================================================================
+    frames = frames.transpose(2, 1, 0)   # (W, H, T) -> (T, H, W)
+    target = target.transpose(2, 1, 0)   # (W, H, 1) -> (1, H, W)
 
-    if GlobalHydra.instance().is_initialized():
-        GlobalHydra.instance().clear()
+    T, H, W = frames.shape
+    print(f"[PROC] After transpose: frames ({T}, {H}, {W}), target {target.shape}")
 
-    initialize_config_dir(
-        version_base="1.2",
-        config_dir=config_abs_path,
-        job_name="trackrad_inference",
-    )
+    # Extract 2D mask from target
+    if target.ndim == 3:
+        mask_np = target[0]  # (1, H, W) -> (H, W)
+    else:
+        mask_np = target
+    mask_np = (mask_np > 0).astype(np.uint8)
+
+    # ==================================================================
+    # Initialize Hydra + Model (with error handling)
+    # ==================================================================
+    try:
+        from hydra import initialize_config_dir
+        from hydra.core.global_hydra import GlobalHydra
+
+        config_abs_path = str(current_dir / "sam2_train")
+
+        if GlobalHydra.instance().is_initialized():
+            GlobalHydra.instance().clear()
+
+        initialize_config_dir(
+            version_base="1.2",
+            config_dir=config_abs_path,
+            job_name="trackrad_inference",
+        )
+        print(f"[HYDRA] Initialized with config_dir={config_abs_path}")
+    except Exception as e:
+        print(f"[HYDRA ERROR] {e}")
+        raise
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"[DEVICE] {device}")
+
     ckpt_path = _find_checkpoint()
 
-    predictor = build_sam2_video_predictor(
-        config_file=CONFIG_NAME,
-        ckpt_path=ckpt_path,
-        device=device,
-    )
+    try:
+        from sam2_train.build_sam import build_sam2_video_predictor
 
-    # ------------------------------------------------------------------
-    # 2. Determine dimensions
-    # ------------------------------------------------------------------
-    # Numpy array from SimpleITK: shape is (T, H, W)
-    # (Official docs label this as (W, H, T) but axis order is the same)
-    ndim = frames.ndim
-    assert ndim == 3, f"Expected 3D frames array, got {ndim}D with shape {frames.shape}"
+        predictor = build_sam2_video_predictor(
+            config_file=CONFIG_NAME,
+            ckpt_path=ckpt_path,
+            device=device,
+        )
+        print(f"[MODEL] Loaded, image_size={predictor.image_size}")
+    except Exception as e:
+        print(f"[MODEL ERROR] {e}")
+        raise
 
-    # We treat axis-0 as T (time), axis-1 as H, axis-2 as W
-    # This is consistent with SimpleITK's GetArrayFromImage output
-    T, H, W = frames.shape
-    print(f"Frames shape (T, H, W): ({T}, {H}, {W})")
-    print(f"Target shape: {target.shape}")
-
-    # ------------------------------------------------------------------
-    # 3. Preprocess frames
-    # ------------------------------------------------------------------
-    # Normalize frames to 0-255 float
+    # ==================================================================
+    # Preprocess frames
+    # ==================================================================
     frames_float = frames.astype(np.float64)
     fmin, fmax = frames_float.min(), frames_float.max()
     if fmax > fmin:
@@ -125,83 +138,75 @@ def run_algorithm(
         frames_norm = np.zeros_like(frames_float)
 
     frames_tensor = torch.from_numpy(frames_norm).float()  # (T, H, W)
+    frames_tensor = frames_tensor.unsqueeze(1).repeat(1, 3, 1, 1)  # (T, 3, H, W)
 
-    # Expand to 3 channels: (T, 3, H, W)
-    frames_tensor = frames_tensor.unsqueeze(1).repeat(1, 3, 1, 1)
-
-    # Resize to model input size
-    target_size = predictor.image_size  # e.g. 1024
+    img_size = predictor.image_size
     frames_resized = F.interpolate(
         frames_tensor,
-        size=(target_size, target_size),
+        size=(img_size, img_size),
         mode="bilinear",
         align_corners=False,
     )
+    print(f"[PREPROC] frames_resized: {frames_resized.shape}")
 
-    # ------------------------------------------------------------------
-    # 4. Initialize inference state
-    # ------------------------------------------------------------------
-    inference_state = predictor.val_init_state(
-        frames_resized,
-        video_height=H,
-        video_width=W,
-    )
+    # ==================================================================
+    # Initialize inference state + add mask
+    # ==================================================================
+    try:
+        inference_state = predictor.val_init_state(
+            frames_resized,
+            video_height=H,
+            video_width=W,
+        )
 
-    # ------------------------------------------------------------------
-    # 5. Prepare and add initial mask (target on frame 0)
-    # ------------------------------------------------------------------
-    # target shape from SimpleITK: (1, H, W)
-    # Could also be (H, W) if squeezed somewhere
-    target_tensor = torch.from_numpy(target.astype(np.float32))
+        mask_tensor = torch.from_numpy(mask_np.astype(np.float32)) > 0
+        print(f"[MASK] shape={mask_tensor.shape}, nonzero={mask_tensor.sum().item()}")
 
-    if target_tensor.ndim == 3:
-        # (1, H, W) -> take first slice to get (H, W)
-        mask = target_tensor[0]
-    elif target_tensor.ndim == 2:
-        mask = target_tensor
-    else:
-        raise ValueError(f"Unexpected target shape: {target.shape}")
+        predictor.add_new_mask(
+            inference_state,
+            frame_idx=0,
+            obj_id=1,
+            mask=mask_tensor,
+        )
+    except Exception as e:
+        print(f"[INIT ERROR] {e}")
+        raise
 
-    # Binarize
-    mask = (mask > 0)
+    # ==================================================================
+    # Propagate (causal, forward only)
+    # ==================================================================
+    video_segments = {}
 
-    print(f"Initial mask shape: {mask.shape}, nonzero pixels: {mask.sum().item()}")
+    try:
+        for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(
+            inference_state
+        ):
+            if 1 in out_obj_ids:
+                idx = out_obj_ids.index(1)
+                logits = out_mask_logits[idx]
+                pred = (logits > 0.0).cpu().numpy().astype(np.uint8)
+                video_segments[out_frame_idx] = pred
+    except Exception as e:
+        print(f"[PROPAGATE ERROR] {e}")
+        raise
 
-    # Add mask on frame 0, object ID 1
-    predictor.add_new_mask(
-        inference_state,
-        frame_idx=0,
-        obj_id=1,
-        mask=mask,
-    )
+    print(f"[PROPAGATE] Got masks for {len(video_segments)}/{T} frames")
 
-    # ------------------------------------------------------------------
-    # 6. Propagate through video (causal, forward only)
-    # ------------------------------------------------------------------
-    video_segments = {}  # frame_idx -> binary mask (H, W)
-
-    for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(
-        inference_state
-    ):
-        # out_mask_logits: (N_obj, H, W)
-        if 1 in out_obj_ids:
-            idx = out_obj_ids.index(1)
-            mask_logits = out_mask_logits[idx]  # (H, W)
-            mask_pred = (mask_logits > 0.0).cpu().numpy().astype(np.uint8)
-            video_segments[out_frame_idx] = mask_pred
-
-    # ------------------------------------------------------------------
-    # 7. Construct output array — same shape as input frames
-    # ------------------------------------------------------------------
+    # ==================================================================
+    # Construct output in (T, H, W)
+    # ==================================================================
     output = np.zeros((T, H, W), dtype=np.uint8)
 
     for t in range(T):
         if t in video_segments:
             output[t] = video_segments[t]
         elif t == 0:
-            # Fallback: use the input mask for frame 0 if propagation
-            # did not return it (it normally should)
-            output[t] = mask.cpu().numpy().astype(np.uint8)
+            output[t] = mask_np
 
-    print(f"Output shape: {output.shape}, unique values: {np.unique(output)}")
-    return output
+    # ==================================================================
+    # CRITICAL FIX 2: Transpose output (T, H, W) -> (W, H, T) to match official format
+    # ==================================================================
+    output = output.transpose(2, 1, 0)  # (T, H, W) -> (W, H, T)
+
+    print(f"[OUTPUT] shape={output.shape}, unique={np.unique(output)}")
+    return output.astype(np.uint8)

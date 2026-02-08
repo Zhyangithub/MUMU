@@ -1,49 +1,37 @@
 FROM --platform=linux/amd64 pytorch/pytorch
 
+# 1. Basic environment
 ENV PYTHONUNBUFFERED=1
 
-# Install system dependencies for OpenCV and other potential needs
+# System dependencies (needed for opencv-python and sam2)
 RUN apt-get update && apt-get install -y \
     libgl1 \
     libglib2.0-0 \
-    git \
     && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd -r user && useradd -m --no-log-init -r -g user user
-
+USER user
 WORKDIR /opt/app
 
-# ---- Install Python dependencies first (for Docker layer caching) ----
+# 2. Copy requirements and sam2_train first (for pip install layer caching)
 COPY --chown=user:user requirements.txt /opt/app/
+COPY --chown=user:user sam2_train/ /opt/app/sam2_train/
 
-# sam2_train must be present before pip install in case it's needed
-# as a local dependency (e.g. imported during setup)
-COPY --chown=user:user sam2_train /opt/app/sam2_train
-
+# 3. Install Python dependencies
 RUN python -m pip install \
     --user \
     --no-cache-dir \
     --no-color \
     --requirement /opt/app/requirements.txt
 
-# ---- Copy application code ----
+# 4. Copy application code
 COPY --chown=user:user inference.py /opt/app/
 COPY --chown=user:user model.py /opt/app/
 COPY --chown=user:user cfg.py /opt/app/
-COPY --chown=user:user resources /opt/app/resources
 
-# Copy Hydra config directory if present (for local testing)
-# On Grand Challenge this may also come from sam2_train/
-COPY --chown=user:user conf /opt/app/conf
+# 5. Copy resource/config directories (must exist, even if empty)
+COPY --chown=user:user resources/ /opt/app/resources/
 
-# ------------------------------------------------------------------
-# Model weights:
-# - For Grand Challenge: upload via "Algorithm Models" -> /opt/ml/model/
-# - For local testing: place in checkpoints/ and uncomment below:
-# COPY --chown=user:user checkpoints /opt/app/checkpoints
-# ------------------------------------------------------------------
-
-# Switch to non-root user (Grand Challenge requirement)
-USER user
+# Model weights: uploaded via Algorithm Models -> /opt/ml/model/
 
 ENTRYPOINT ["python", "inference.py"]
