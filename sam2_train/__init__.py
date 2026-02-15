@@ -5,5 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 from hydra import initialize_config_module
+from hydra.core.global_hydra import GlobalHydra
 
-initialize_config_module("sam2_train", version_base="1.2")
+# Avoid double initialization when the caller already initialized Hydra.
+if not GlobalHydra.instance().is_initialized():
+    initialize_config_module("sam2_train", version_base="1.2")

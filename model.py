@@ -87,28 +87,8 @@ def run_algorithm(
         mask_np = target
     mask_np = (mask_np > 0).astype(np.uint8)
 
-    # ==================================================================
-    # Initialize Hydra + Model (with error handling)
-    # ==================================================================
-    try:
-        from hydra import initialize_config_dir
-        from hydra.core.global_hydra import GlobalHydra
-
-        config_abs_path = str(current_dir / "sam2_train")
-
-        if GlobalHydra.instance().is_initialized():
-            GlobalHydra.instance().clear()
-
-        initialize_config_dir(
-            version_base="1.2",
-            config_dir=config_abs_path,
-            job_name="trackrad_inference",
-        )
-        print(f"[HYDRA] Initialized with config_dir={config_abs_path}")
-    except Exception as e:
-        print(f"[HYDRA ERROR] {e}")
-        raise
-
+    # Hydra initialization is handled inside sam2_train/__init__.py.
+    # Avoid re-initializing here, which can trigger GlobalHydra conflicts.
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"[DEVICE] {device}")
 
