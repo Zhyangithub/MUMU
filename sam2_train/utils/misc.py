@@ -58,9 +58,37 @@ def get_connected_components(mask):
     - counts: A tensor of shape (N, 1, H, W) containing the area of the connected
               components for foreground pixels and 0 for background pixels.
     """
-    from sam2_train import _C
+    try:
+        from sam2_train import _C
 
-    return _C.get_connected_componnets(mask.to(torch.uint8).contiguous())
+        return _C.get_connected_componnets(mask.to(torch.uint8).contiguous())
+    except Exception as e:
+        warnings.warn(
+            f"Falling back to Python connected-components implementation: {e}",
+            category=UserWarning,
+            stacklevel=2,
+        )
+        # Fallback path to avoid runtime failure when _C.so ABI is incompatible.
+        # This is slower but robust for challenge inference.
+        import cv2
+
+        mask_np = mask.to(torch.uint8).contiguous().detach().cpu().numpy()
+        labels_np = np.zeros_like(mask_np, dtype=np.int32)
+        counts_np = np.zeros_like(mask_np, dtype=np.int32)
+
+        for i in range(mask_np.shape[0]):
+            n_labels, labels_i, stats_i, _ = cv2.connectedComponentsWithStats(
+                mask_np[i, 0], connectivity=8
+            )
+            if n_labels <= 0:
+                continue
+            labels_np[i, 0] = labels_i
+            areas = stats_i[:, cv2.CC_STAT_AREA]
+            counts_np[i, 0] = areas[labels_i]
+
+        labels = torch.from_numpy(labels_np).to(mask.device)
+        counts = torch.from_numpy(counts_np).to(mask.device)
+        return labels, counts
 
 
 def mask_to_box(masks: torch.Tensor):

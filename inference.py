@@ -76,7 +76,10 @@ def load_json_file(*, location):
 
 def load_image_file_as_array(*, location):
     # Use SimpleITK to read a file
-    input_files = glob(str(location / "*.tiff")) + glob(str(location / "*.mha"))
+    input_files = sorted(glob(str(location / "*.tiff")) + glob(str(location / "*.mha")))
+    if not input_files:
+        raise FileNotFoundError(f"No input image found under: {location}")
+    print(f"[IO] Loading image: {input_files[0]}")
     result = SimpleITK.ReadImage(input_files[0])
 
     # Convert it to a Numpy array

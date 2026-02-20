@@ -17,6 +17,9 @@ WORKDIR /opt/app
 COPY --chown=user:user requirements.txt /opt/app/
 COPY --chown=user:user sam2_train/ /opt/app/sam2_train/
 
+# Remove local compiled extension/cache artifacts to avoid ABI issues in GC runtime.
+RUN rm -f /opt/app/sam2_train/_C.so && find /opt/app -name "*.pyc" -delete
+
 # 3. Install Python dependencies
 RUN python -m pip install \
     --user \
