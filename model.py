@@ -3,7 +3,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import sys
-import os
 
 # Add current directory to sys.path
 current_dir = Path(__file__).parent.resolve()
@@ -16,21 +15,22 @@ GC_MODEL_PATH = Path("/opt/ml/model")
 LOCAL_CHECKPOINT_PATH = current_dir / "checkpoints" / "best_dice.pth"
 
 
+
 def _find_checkpoint() -> str:
     """Locate the model checkpoint, preferring Grand Challenge path."""
-    # 1. Exact match
+    # 1) Exact match
     gc_ckpt = GC_MODEL_PATH / "best_dice.pth"
     if gc_ckpt.exists():
         print(f"[CKPT] Found: {gc_ckpt}")
         return str(gc_ckpt)
 
-    # 2. Any .pth at top level
+    # 2) Any .pth at top level
     if GC_MODEL_PATH.exists():
         for p in GC_MODEL_PATH.glob("*.pth"):
             print(f"[CKPT] Found: {p}")
             return str(p)
 
-        # 3. Recursive search
+        # 3) Recursive search
         for p in GC_MODEL_PATH.rglob("*.pth"):
             print(f"[CKPT] Found (recursive): {p}")
             return str(p)
@@ -40,7 +40,7 @@ def _find_checkpoint() -> str:
         for p in GC_MODEL_PATH.rglob("*"):
             print(f"  {p} ({p.stat().st_size / 1e6:.1f} MB)" if p.is_file() else f"  {p}/")
 
-    # 4. Local fallback
+    # 4) Local fallback
     if LOCAL_CHECKPOINT_PATH.exists():
         print(f"[CKPT] Local fallback: {LOCAL_CHECKPOINT_PATH}")
         return str(LOCAL_CHECKPOINT_PATH)
@@ -51,6 +51,76 @@ def _find_checkpoint() -> str:
 
 
 CONFIG_NAME = "sam2_hiera_s.yaml"
+
+
+
+def _to_thw(arr: np.ndarray, name: str) -> tuple[np.ndarray, str]:
+    """Convert a 2D/3D array to (T, H, W) and return original layout tag."""
+    if arr.ndim == 2:
+        return arr[None, ...], "THW"
+    if arr.ndim != 3:
+        raise ValueError(f"{name} must be 2D or 3D, got shape={arr.shape}")
+
+    d0, d1, d2 = arr.shape
+
+    # Common GC wrapper layout for this challenge: (W, H, T) with W ~= H.
+    if d0 == d1 and d2 != d0:
+        return arr.transpose(2, 1, 0), "HWT"
+
+    # Already (T, H, W) when H ~= W.
+    if d1 == d2 and d0 != d1:
+        return arr, "THW"
+
+    # Fallback: infer shortest axis as time.
+    t_axis = int(np.argmin(arr.shape))
+    if t_axis == 0:
+        return arr, "THW"
+    if t_axis == 2:
+        return arr.transpose(2, 1, 0), "HWT"
+    # Rare case: (H, T, W) -> (T, H, W)
+    return arr.transpose(1, 0, 2), "HTW"
+
+
+
+def _from_thw(arr_thw: np.ndarray, layout: str) -> np.ndarray:
+    """Restore (T, H, W) array back to original layout."""
+    if layout == "THW":
+        return arr_thw
+    if layout == "HWT":
+        return arr_thw.transpose(2, 1, 0)
+    if layout == "HTW":
+        return arr_thw.transpose(1, 0, 2)
+    raise ValueError(f"Unknown layout tag: {layout}")
+
+
+
+def _pick_prompt_mask(target_thw: np.ndarray) -> np.ndarray:
+    """Pick first non-empty target frame as 2D prompt mask."""
+    if target_thw.ndim == 2:
+        mask = target_thw
+    elif target_thw.ndim == 3:
+        flat_sum = target_thw.reshape(target_thw.shape[0], -1).sum(axis=1)
+        nz = np.where(flat_sum > 0)[0]
+        frame_idx = int(nz[0]) if nz.size > 0 else 0
+        print(f"[PROMPT] Using target frame index={frame_idx}")
+        mask = target_thw[frame_idx]
+    else:
+        raise ValueError(f"target must be 2D/3D, got shape={target_thw.shape}")
+    return (mask > 0).astype(np.uint8)
+
+
+
+def _coerce_pred_hw(pred: np.ndarray, h: int, w: int) -> np.ndarray:
+    """Convert predictor output to binary (H, W)."""
+    out = np.asarray(pred)
+    while out.ndim > 2:
+        out = out[0]
+    if out.shape != (h, w):
+        out_t = torch.from_numpy(out.astype(np.float32)).unsqueeze(0).unsqueeze(0)
+        out_t = F.interpolate(out_t, size=(h, w), mode="nearest")
+        out = out_t[0, 0].numpy()
+    return (out > 0).astype(np.uint8)
+
 
 
 def run_algorithm(
@@ -64,31 +134,23 @@ def run_algorithm(
     MedSAM-2 based tumor tracking algorithm.
 
     Args:
-        frames: (W, H, T) — official convention from inference.py
-        target: (W, H, 1) — official convention from inference.py
+        frames: challenge input series array
+        target: challenge input first-frame mask (or a full mask sequence)
     Returns:
-        output: (W, H, T) — must match input frames shape
+        output: same layout as input `frames`
     """
     print(f"[INPUT] frames.shape = {frames.shape}, target.shape = {target.shape}")
 
-    # ==================================================================
-    # CRITICAL FIX 1: Transpose input (W, H, T) -> (T, H, W) for processing
-    # ==================================================================
-    frames = frames.transpose(2, 1, 0)   # (W, H, T) -> (T, H, W)
-    target = target.transpose(2, 1, 0)   # (W, H, 1) -> (1, H, W)
+    # Normalize inputs to canonical (T, H, W)
+    frames_thw, frames_layout = _to_thw(frames, "frames")
+    target_thw, _ = _to_thw(target, "target")
 
-    T, H, W = frames.shape
-    print(f"[PROC] After transpose: frames ({T}, {H}, {W}), target {target.shape}")
+    T, H, W = frames_thw.shape
+    print(f"[PROC] Canonical THW: frames ({T}, {H}, {W}), target {target_thw.shape}")
 
-    # Extract 2D mask from target
-    if target.ndim == 3:
-        mask_np = target[0]  # (1, H, W) -> (H, W)
-    else:
-        mask_np = target
-    mask_np = (mask_np > 0).astype(np.uint8)
+    mask_np = _pick_prompt_mask(target_thw)
 
     # Hydra initialization is handled inside sam2_train/__init__.py.
-    # Avoid re-initializing here, which can trigger GlobalHydra conflicts.
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"[DEVICE] {device}")
 
@@ -110,7 +172,7 @@ def run_algorithm(
     # ==================================================================
     # Preprocess frames
     # ==================================================================
-    frames_float = frames.astype(np.float64)
+    frames_float = frames_thw.astype(np.float64)
     fmin, fmax = frames_float.min(), frames_float.max()
     if fmax > fmin:
         frames_norm = (frames_float - fmin) / (fmax - fmin) * 255.0
@@ -164,7 +226,7 @@ def run_algorithm(
             if 1 in out_obj_ids:
                 idx = out_obj_ids.index(1)
                 logits = out_mask_logits[idx]
-                pred = (logits > 0.0).cpu().numpy().astype(np.uint8)
+                pred = _coerce_pred_hw((logits > 0.0).cpu().numpy().astype(np.uint8), H, W)
                 video_segments[out_frame_idx] = pred
     except Exception as e:
         print(f"[PROPAGATE ERROR] {e}")
@@ -173,20 +235,18 @@ def run_algorithm(
     print(f"[PROPAGATE] Got masks for {len(video_segments)}/{T} frames")
 
     # ==================================================================
-    # Construct output in (T, H, W)
+    # Construct output in canonical (T, H, W)
     # ==================================================================
-    output = np.zeros((T, H, W), dtype=np.uint8)
+    output_thw = np.zeros((T, H, W), dtype=np.uint8)
 
     for t in range(T):
         if t in video_segments:
-            output[t] = video_segments[t]
+            output_thw[t] = video_segments[t]
         elif t == 0:
-            output[t] = mask_np
+            output_thw[t] = mask_np
 
-    # ==================================================================
-    # CRITICAL FIX 2: Transpose output (T, H, W) -> (W, H, T) to match official format
-    # ==================================================================
-    output = output.transpose(2, 1, 0)  # (T, H, W) -> (W, H, T)
+    # Restore original input layout expected by wrapper.
+    output = _from_thw(output_thw, frames_layout)
 
     print(f"[OUTPUT] shape={output.shape}, unique={np.unique(output)}")
     return output.astype(np.uint8)

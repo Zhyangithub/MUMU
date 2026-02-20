@@ -60,8 +60,9 @@ def build_sam2_video_predictor(
             "++model.sam_mask_decoder_extra_args.dynamic_multimask_stability_thresh=0.98",
             # the sigmoid mask logits on interacted frames with clicks in the memory encoder so that the encoded masks are exactly as what users see from clicking
             "++model.binarize_mask_from_pts_for_mem_enc=true",
-            # fill small holes in the low-res masks up to `fill_hole_area` (before resizing them to the original video resolution)
-            "++model.fill_hole_area=8",
+            # Disable hole-filling postprocess in GC runtime to avoid loading custom C++ extension (_C.so)
+            # that may be ABI-incompatible with the preinstalled torch.
+            "++model.fill_hole_area=0",
         ]
     hydra_overrides.extend(hydra_overrides_extra)
 

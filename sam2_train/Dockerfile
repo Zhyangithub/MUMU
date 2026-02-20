@@ -17,6 +17,7 @@ WORKDIR /opt/app
 COPY --chown=user:user requirements.txt /opt/app/
 COPY --chown=user:user resources /opt/app/resources
 COPY sam2_train/ /opt/app/sam2_train/
+RUN rm -f /opt/app/sam2_train/_C.so && find /opt/app -name "*.pyc" -delete
 # Install requirements.txt
 RUN python -m pip install \
     --user \
@@ -28,6 +29,7 @@ COPY --chown=user:user inference.py /opt/app/
 COPY --chown=user:user model.py /opt/app/
 COPY --chown=user:user cfg.py /opt/app/
 COPY --chown=user:user sam2_train /opt/app/sam2_train
+RUN rm -f /opt/app/sam2_train/_C.so && find /opt/app -name "*.pyc" -delete
 COPY --chown=user:user conf /opt/app/conf
 
 # 注意：模型权重通过 Algorithm Models 上传到 /opt/ml/model/
