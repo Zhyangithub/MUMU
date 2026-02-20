@@ -55,6 +55,9 @@ def run():
     # Enforce uint8 as output dtype
     output_mri_linac_series_targets = output_mri_linac_series_targets.astype(np.uint8)
     
+    if output_mri_linac_series_targets.ndim == 3:
+        output_mri_linac_series_targets = output_mri_linac_series_targets.transpose(1, 0, 2)
+    
     print(f"Runtime algorithm: {time.perf_counter() - algo_start_time:.5f} s")
 
     writing_start_time = time.perf_counter()
