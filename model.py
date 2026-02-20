@@ -224,11 +224,15 @@ def run_algorithm(
         for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(
             inference_state
         ):
-            if 1 in out_obj_ids:
-                idx = out_obj_ids.index(1)
+            # obj_id=1 (from add_new_mask); obj_ids may be list or tuple
+            obj_ids_list = list(out_obj_ids) if hasattr(out_obj_ids, "__iter__") else [out_obj_ids]
+            if 1 in obj_ids_list:
+                idx = obj_ids_list.index(1)
                 logits = out_mask_logits[idx]
                 pred = _coerce_pred_hw((logits > 0.0).cpu().numpy().astype(np.uint8), H, W)
                 video_segments[out_frame_idx] = pred
+            else:
+                print(f"[PROPAGATE] Frame {out_frame_idx}: obj_ids={obj_ids_list} (expected 1)")
     except Exception as e:
         print(f"[PROPAGATE ERROR] {e}")
         raise
