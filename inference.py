@@ -31,8 +31,9 @@ def run():
     input_scanned_region = load_json_file(
          location=INPUT_PATH / "scanned-region.json",
     )
-    input_mri_linac_series = load_image_file_as_array(
+    input_mri_linac_series, input_mri_linac_series_img = load_image_file_as_array(
         location=INPUT_PATH / "images/mri-linacs",
+        return_image=True,
     )
 
     input_mri_linac_target = load_image_file_as_array(
@@ -62,6 +63,7 @@ def run():
     write_array_as_image_file(
         location=OUTPUT_PATH / "images/mri-linac-series-targets",
         array=output_mri_linac_series_targets,
+        reference_image=input_mri_linac_series_img,
     )
     print(f"Runtime writing:   {time.perf_counter() - writing_start_time:.5f} s")
     
@@ -74,7 +76,7 @@ def load_json_file(*, location):
         return json.loads(f.read())
 
 
-def load_image_file_as_array(*, location):
+def load_image_file_as_array(*, location, return_image=False):
     # Use SimpleITK to read a file
     input_files = sorted(glob(str(location / "*.tiff")) + glob(str(location / "*.mha")))
     if not input_files:
@@ -83,16 +85,27 @@ def load_image_file_as_array(*, location):
     result = SimpleITK.ReadImage(input_files[0])
 
     # Convert it to a Numpy array
-    return SimpleITK.GetArrayFromImage(result)
+    array = SimpleITK.GetArrayFromImage(result)
+    if return_image:
+        return array, result
+    return array
 
 
-def write_array_as_image_file(*, location, array):
+def write_array_as_image_file(*, location, array, reference_image=None):
     location.mkdir(parents=True, exist_ok=True)
 
     # You may need to change the suffix to .tiff to match the expected output
     suffix = ".mha"
 
     image = SimpleITK.GetImageFromArray(array)
+    if reference_image is not None:
+        if image.GetSize() == reference_image.GetSize():
+            image.CopyInformation(reference_image)
+        else:
+            print(
+                f"[WARN] Skip CopyInformation due to size mismatch: "
+                f"output_size={image.GetSize()} vs ref_size={reference_image.GetSize()}"
+            )
     SimpleITK.WriteImage(
         image,
         location / f"output{suffix}",

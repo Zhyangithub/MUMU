@@ -94,10 +94,11 @@ def _from_thw(arr_thw: np.ndarray, layout: str) -> np.ndarray:
 
 
 
-def _pick_prompt_mask(target_thw: np.ndarray) -> np.ndarray:
-    """Pick first non-empty target frame as 2D prompt mask."""
+def _pick_prompt_mask(target_thw: np.ndarray) -> tuple[np.ndarray, int]:
+    """Pick first non-empty target frame as 2D prompt mask and frame index."""
     if target_thw.ndim == 2:
         mask = target_thw
+        frame_idx = 0
     elif target_thw.ndim == 3:
         flat_sum = target_thw.reshape(target_thw.shape[0], -1).sum(axis=1)
         nz = np.where(flat_sum > 0)[0]
@@ -106,7 +107,7 @@ def _pick_prompt_mask(target_thw: np.ndarray) -> np.ndarray:
         mask = target_thw[frame_idx]
     else:
         raise ValueError(f"target must be 2D/3D, got shape={target_thw.shape}")
-    return (mask > 0).astype(np.uint8)
+    return (mask > 0).astype(np.uint8), frame_idx
 
 
 
@@ -148,7 +149,7 @@ def run_algorithm(
     T, H, W = frames_thw.shape
     print(f"[PROC] Canonical THW: frames ({T}, {H}, {W}), target {target_thw.shape}")
 
-    mask_np = _pick_prompt_mask(target_thw)
+    mask_np, prompt_frame_idx = _pick_prompt_mask(target_thw)
 
     # Hydra initialization is handled inside sam2_train/__init__.py.
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -206,7 +207,7 @@ def run_algorithm(
 
         predictor.add_new_mask(
             inference_state,
-            frame_idx=0,
+            frame_idx=prompt_frame_idx,
             obj_id=1,
             mask=mask_tensor,
         )
