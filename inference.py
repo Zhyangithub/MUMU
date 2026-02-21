@@ -31,9 +31,8 @@ def run():
     input_scanned_region = load_json_file(
          location=INPUT_PATH / "scanned-region.json",
     )
-    input_mri_linac_series, input_mri_linac_series_img = load_image_file_as_array(
+    input_mri_linac_series = load_image_file_as_array(
         location=INPUT_PATH / "images/mri-linacs",
-        return_image=True,
     )
 
     input_mri_linac_target = load_image_file_as_array(
@@ -52,21 +51,17 @@ def run():
                                                     magnetic_field_strength=input_magnetic_field_strength,
                                                     scanned_region=input_scanned_region)
     
-    # Enforce uint8 as output dtype
+    # Enforce uint8 as output dtype (model returns (H, W, T) for evaluation)
     output_mri_linac_series_targets = output_mri_linac_series_targets.astype(np.uint8)
-    
-    if output_mri_linac_series_targets.ndim == 3:
-        output_mri_linac_series_targets = output_mri_linac_series_targets.transpose(1, 0, 2)
     
     print(f"Runtime algorithm: {time.perf_counter() - algo_start_time:.5f} s")
 
     writing_start_time = time.perf_counter()
 
-    # Save the output
+    # Save the output - match baseline: NO reference_image/CopyInformation
     write_array_as_image_file(
         location=OUTPUT_PATH / "images/mri-linac-series-targets",
         array=output_mri_linac_series_targets,
-        reference_image=input_mri_linac_series_img,
     )
     print(f"Runtime writing:   {time.perf_counter() - writing_start_time:.5f} s")
     
@@ -81,7 +76,7 @@ def load_json_file(*, location):
 
 def load_image_file_as_array(*, location, return_image=False):
     # Use SimpleITK to read a file
-    input_files = sorted(glob(str(location / "*.tiff")) + glob(str(location / "*.mha")))
+    input_files = glob(str(location / "*.tiff")) + glob(str(location / "*.mha"))
     if not input_files:
         raise FileNotFoundError(f"No input image found under: {location}")
     print(f"[IO] Loading image: {input_files[0]}")
@@ -94,21 +89,14 @@ def load_image_file_as_array(*, location, return_image=False):
     return array
 
 
-def write_array_as_image_file(*, location, array, reference_image=None):
+def write_array_as_image_file(*, location, array):
+    """Match baseline: no reference_image, no CopyInformation."""
     location.mkdir(parents=True, exist_ok=True)
 
     # You may need to change the suffix to .tiff to match the expected output
     suffix = ".mha"
 
     image = SimpleITK.GetImageFromArray(array)
-    if reference_image is not None:
-        if image.GetSize() == reference_image.GetSize():
-            image.CopyInformation(reference_image)
-        else:
-            print(
-                f"[WARN] Skip CopyInformation due to size mismatch: "
-                f"output_size={image.GetSize()} vs ref_size={reference_image.GetSize()}"
-            )
     SimpleITK.WriteImage(
         image,
         location / f"output{suffix}",
