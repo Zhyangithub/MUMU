@@ -250,8 +250,9 @@ def run_algorithm(
         elif t == 0:
             output_thw[t] = mask_np
 
-    # Restore original input layout expected by wrapper.
-    output = _from_thw(output_thw, frames_layout)
+    # Always return (H, W, T) to match evaluation: transpose(2,0,1) -> (T, H, W)
+    # Do NOT use _from_thw - GC evaluation expects (H, W, T) regardless of input layout
+    output = output_thw.transpose(1, 2, 0)  # (T, H, W) -> (H, W, T)
 
     print(f"[OUTPUT] shape={output.shape}, unique={np.unique(output)}")
     return output.astype(np.uint8)
