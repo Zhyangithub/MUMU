@@ -52,7 +52,8 @@ def _find_checkpoint() -> str:
 
 
 DEFAULT_CONFIG_CANDIDATES = [
-    "sam2_hiera_t.yaml",  # v3训练产出的权重通常对应t系配置
+    "sam2.1_hiera_t512.yaml",  # 与v3训练/推理默认配置保持一致
+    "sam2_hiera_t.yaml",
     "sam2_hiera_s.yaml",
 ]
 
