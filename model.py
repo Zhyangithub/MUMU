@@ -3,6 +3,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import sys
+import os
 
 # Add current directory to sys.path
 current_dir = Path(__file__).parent.resolve()
@@ -50,7 +51,21 @@ def _find_checkpoint() -> str:
     )
 
 
-CONFIG_NAME = "sam2_hiera_s.yaml"
+DEFAULT_CONFIG_CANDIDATES = [
+    "sam2_hiera_t.yaml",  # v3训练产出的权重通常对应t系配置
+    "sam2_hiera_s.yaml",
+]
+
+
+def _get_config_candidates() -> list[str]:
+    """
+    Resolve config candidates from env and defaults.
+    You can force a specific config via SAM2_CONFIG_NAME.
+    """
+    forced = os.getenv("SAM2_CONFIG_NAME", "").strip()
+    if forced:
+        return [forced]
+    return DEFAULT_CONFIG_CANDIDATES.copy()
 
 
 
@@ -157,15 +172,30 @@ def run_algorithm(
 
     ckpt_path = _find_checkpoint()
 
+    config_candidates = _get_config_candidates()
+    print(f"[MODEL] Try config candidates: {config_candidates}")
+    last_error = None
+    predictor = None
     try:
         from sam2_train.build_sam import build_sam2_video_predictor
-
-        predictor = build_sam2_video_predictor(
-            config_file=CONFIG_NAME,
-            ckpt_path=ckpt_path,
-            device=device,
-        )
-        print(f"[MODEL] Loaded, image_size={predictor.image_size}")
+        for cfg_name in config_candidates:
+            try:
+                print(f"[MODEL] Trying config: {cfg_name}")
+                predictor = build_sam2_video_predictor(
+                    config_file=cfg_name,
+                    ckpt_path=ckpt_path,
+                    device=device,
+                )
+                print(f"[MODEL] Loaded with {cfg_name}, image_size={predictor.image_size}")
+                break
+            except Exception as e:
+                last_error = e
+                print(f"[MODEL WARN] Failed with {cfg_name}: {e}")
+        if predictor is None:
+            raise RuntimeError(
+                f"Failed to load checkpoint with configs={config_candidates}. "
+                f"Last error: {last_error}"
+            )
     except Exception as e:
         print(f"[MODEL ERROR] {e}")
         raise
