@@ -73,6 +73,8 @@ class SAM2Base(torch.nn.Module):
         # whether to add an extra linear projection layer for the temporal positional encoding in the object pointers to avoid potential interference
         # with spatial positional encoding (only relevant when both `use_obj_ptrs_in_encoder=True` and `add_tpos_enc_to_obj_ptrs=True`)
         proj_tpos_enc_in_obj_ptrs=False,
+        # whether to use signed temporal distance in object pointer tpos encoding
+        use_signed_tpos_enc_to_obj_ptrs=False,
         # whether to only attend to object pointers in the past (before the current frame) in the encoder during evaluation
         # (only relevant when `use_obj_ptrs_in_encoder=True`; this might avoid pointer information too far in the future to distract the initial tracking)
         only_obj_ptrs_in_the_past_for_eval=False,
@@ -88,6 +90,8 @@ class SAM2Base(torch.nn.Module):
         # hope to make recovery easier if there is a mistake and mitigate accumulation of errors
         soft_no_obj_ptr: bool = False,
         use_mlp_for_obj_ptr_proj: bool = False,
+        # add no-object embedding to spatial memory features
+        no_obj_embed_spatial: bool = False,
         # extra arguments used to construct the SAM mask decoder; if not None, it should be a dict of kwargs to be passed into `MaskDecoder` class.
         sam_mask_decoder_extra_args=None,
         compile_image_encoder: bool = False,
@@ -110,6 +114,7 @@ class SAM2Base(torch.nn.Module):
         if proj_tpos_enc_in_obj_ptrs:
             assert add_tpos_enc_to_obj_ptrs  # these options need to be used together
         self.proj_tpos_enc_in_obj_ptrs = proj_tpos_enc_in_obj_ptrs
+        self.use_signed_tpos_enc_to_obj_ptrs = use_signed_tpos_enc_to_obj_ptrs
         self.only_obj_ptrs_in_the_past_for_eval = only_obj_ptrs_in_the_past_for_eval
 
         # Part 2: memory attention to condition current frame's visual features
@@ -170,6 +175,10 @@ class SAM2Base(torch.nn.Module):
             self.no_obj_ptr = torch.nn.Parameter(torch.zeros(1, self.hidden_dim))
             trunc_normal_(self.no_obj_ptr, std=0.02)
         self.use_mlp_for_obj_ptr_proj = use_mlp_for_obj_ptr_proj
+        self.no_obj_embed_spatial = None
+        if no_obj_embed_spatial:
+            self.no_obj_embed_spatial = torch.nn.Parameter(torch.zeros(1, self.mem_dim))
+            trunc_normal_(self.no_obj_embed_spatial, std=0.02)
 
         self._build_sam_heads()
         self.add_all_frames_to_correct_as_cond = add_all_frames_to_correct_as_cond
