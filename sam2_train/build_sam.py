@@ -79,12 +79,23 @@ def build_sam2_video_predictor(
 
 def _load_checkpoint(model, ckpt_path):
     if ckpt_path is not None:
-        sd = torch.load(ckpt_path, map_location="cpu")["model"]
-        missing_keys, unexpected_keys = model.load_state_dict(sd)
+        raw = torch.load(ckpt_path, map_location="cpu")
+        sd = raw["model"] if isinstance(raw, dict) and "model" in raw else raw
+        # Use non-strict loading to tolerate minor architecture/key differences
+        # between training checkpoint wrappers and GC inference model.
+        incompatible = model.load_state_dict(sd, strict=False)
+        missing_keys = getattr(incompatible, "missing_keys", [])
+        unexpected_keys = getattr(incompatible, "unexpected_keys", [])
         if missing_keys:
-            logging.error(missing_keys)
-            raise RuntimeError()
+            logging.warning(
+                "Missing keys while loading checkpoint (showing first 20/%d): %s",
+                len(missing_keys),
+                missing_keys[:20],
+            )
         if unexpected_keys:
-            logging.error(unexpected_keys)
-            raise RuntimeError()
-        logging.info("Loaded checkpoint sucessfully")
+            logging.warning(
+                "Unexpected keys while loading checkpoint (showing first 20/%d): %s",
+                len(unexpected_keys),
+                unexpected_keys[:20],
+            )
+        logging.info("Loaded checkpoint successfully (strict=False)")
